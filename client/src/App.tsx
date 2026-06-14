@@ -35,16 +35,20 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const { toast } = useToast();
 
-  const authFetch = useCallback(async (url: string, opts: RequestInit = {}) => {
-    const headers: Record<string, string> = { ...(opts.headers as Record<string, string> || {}) };
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    return fetch(url, { ...opts, headers });
-  }, [token]);
+  // On every page load, try to restore session via httpOnly cookie
+  useEffect(() => {
+    fetch(`${API}/api/me`, { credentials: "include" })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) setUser(data); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
 
   const refreshUser = useCallback(async () => {
-    if (!token) { setLoading(false); return; }
     try {
-      const res = await fetch(`${API}/api/me`, { headers: { Authorization: `Bearer ${token}` } });
+      const headers: Record<string, string> = {};
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await fetch(`${API}/api/me`, { credentials: "include", headers });
       if (res.ok) {
         const data = await res.json();
         setUser(data);
@@ -53,20 +57,17 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser(null);
       }
     } catch { setUser(null); }
-    setLoading(false);
   }, [token]);
-
-  useEffect(() => { refreshUser(); }, [token]);
 
   const login = async (email: string, password: string) => {
     const fd = new FormData();
     fd.append("email", email);
     fd.append("password", password);
-    const res = await fetch(`${API}/api/login`, { method: "POST", body: fd });
+    const res = await fetch(`${API}/api/login`, { method: "POST", body: fd, credentials: "include" });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Login failed");
     const tok = res.headers.get("X-Auth-Token") || data.token;
-    if (tok) { setToken(tok); }
+    if (tok) setToken(tok);
     setUser({ id: data.id, email: data.email, has_gemini_key: data.has_gemini_key });
   };
 
@@ -74,16 +75,16 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     const fd = new FormData();
     fd.append("email", email);
     fd.append("password", password);
-    const res = await fetch(`${API}/api/register`, { method: "POST", body: fd });
+    const res = await fetch(`${API}/api/register`, { method: "POST", body: fd, credentials: "include" });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Registration failed");
     const tok = res.headers.get("X-Auth-Token") || data.token;
-    if (tok) { setToken(tok); }
+    if (tok) setToken(tok);
     setUser({ id: data.id, email: data.email, has_gemini_key: false });
   };
 
   const logout = () => {
-    fetch(`${API}/api/logout`, { method: "POST" });
+    fetch(`${API}/api/logout`, { method: "POST", credentials: "include" });
     setToken(null);
     setUser(null);
   };
@@ -305,8 +306,8 @@ function SettingsPanel({ open, onClose }: { open: boolean; onClose: () => void }
     fd.append("gemini_api_key", apiKey.trim());
     try {
       const res = await fetch(`${API}/api/user/gemini-key`, {
-        method: "POST", body: fd,
-        headers: { Authorization: `Bearer ${token}` }
+        method: "POST", body: fd, credentials: "include",
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail);
@@ -322,8 +323,8 @@ function SettingsPanel({ open, onClose }: { open: boolean; onClose: () => void }
     setRemoving(true);
     try {
       await fetch(`${API}/api/user/gemini-key`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` }
+        method: "DELETE", credentials: "include",
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
       toast({ title: "Key removed" });
       await refreshUser();
@@ -500,8 +501,8 @@ function AppPage() {
 
     try {
       const res = await fetch(`${API}/api/search`, {
-        method: "POST", body: fd,
-        headers: { Authorization: `Bearer ${token}` }
+        method: "POST", body: fd, credentials: "include",
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Search failed");
@@ -526,8 +527,8 @@ function AppPage() {
     fd.append("job_description", selectedJob.full_description);
     try {
       const res = await fetch(`${API}/api/tailor`, {
-        method: "POST", body: fd,
-        headers: { Authorization: `Bearer ${token}` }
+        method: "POST", body: fd, credentials: "include",
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Tailor failed");
@@ -547,8 +548,8 @@ function AppPage() {
     fd.append("company", selectedJob.company);
     try {
       const res = await fetch(`${API}/api/download`, {
-        method: "POST", body: fd,
-        headers: { Authorization: `Bearer ${token}` }
+        method: "POST", body: fd, credentials: "include",
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
       if (!res.ok) throw new Error("Download failed");
       const blob = await res.blob();

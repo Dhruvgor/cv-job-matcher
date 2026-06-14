@@ -60,10 +60,30 @@ def init_db():
 # ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(title="CV Job Matcher API", version="2.0.0")
 
+# Allow any origin but support credentials (cookies) by reflecting the
+# request Origin back — required when using credentials: "include" on the frontend.
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
+
+class CredentialCORSMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: StarletteRequest, call_next):
+        origin = request.headers.get("origin", "")
+        response = await call_next(request)
+        if origin:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Allow-Methods"] = "*"
+            response.headers["Access-Control-Allow-Headers"] = "*"
+        return response
+
+app.add_middleware(CredentialCORSMiddleware)
+
+# Keep the standard middleware for preflight OPTIONS requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
