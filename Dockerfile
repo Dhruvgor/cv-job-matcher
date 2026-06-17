@@ -1,26 +1,32 @@
-# Step 1: Use a reliable Node image to install packages and build the system
-FROM node:20-slim
-
-# Set the working directory inside our container
+# Step 1: Build stage
+FROM node:20-slim AS builder
 WORKDIR /app
-
-# Install Python and core system dependencies first
-RUN apt-get update && apt-get install -y python3 python3-pip && rm -rf /lib/apt/lists/*
-
-# Copy dependency manifests first to optimize cache layers
-COPY package*.json requirements.txt ./
-
-# Install frontend node packages and python packages simultaneously
-RUN npm install && pip install --no-cache-dir -r requirements.txt --break-system-packages
-
-# Copy the rest of your app's code files into the container
+COPY package*.json ./
+RUN npm install
 COPY . .
-
-# Build your production client static assets 
 RUN npm run build
 
-# Cloud Run injects a dynamic $PORT environment variable. Expose it!
+# Step 2: Final execution stage
+FROM node:20-slim
+WORKDIR /app
+
+# Install Python and pip
+RUN apt-get update && apt-get install -y python3 python3-pip && rm -rf /var/lib/apt/lists/*
+
+# Copy build files from stage 1 and configuration scripts
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/requirements.txt ./
+COPY --from=builder /app/api_server.py ./
+
+# Install python and production node dependencies
+RUN npm install --production
+RUN pip install --no-cache-dir -r requirements.txt --break-system-packages
+
+# Install 'concurrently' to run both Python and Node servers together
+RUN npm install -g concurrently
+
 EXPOSE 8080
 
-# Execute the application startup sequence
-CMD ["npm", "start"]
+# Run BOTH the python backend and the web server together on launch
+CMD ["concurrently", "python3 api_server.py", "npm start"]
