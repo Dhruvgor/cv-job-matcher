@@ -8,10 +8,13 @@ CV Job Matcher — FastAPI Backend
 - POST /api/download : Generate polished PDF of tailored CV
 """
 
+import asyncio
 import io
 import json
+import logging
 import os
 import re
+import secrets
 import sqlite3
 import textwrap
 from datetime import datetime, timedelta
@@ -30,16 +33,30 @@ from google.genai import types as genai_types
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
 
+logger = logging.getLogger("cv_job_matcher")
+
 # ── Security ───────────────────────────────────────────────────────────────────
-SECRET_KEY = os.environ.get("JWT_SECRET", "cv-job-matcher-super-secret-key-change-in-prod")
+# No hardcoded fallback: a committed default secret lets anyone who reads this
+# repo mint valid tokens against any deployment that forgot to set JWT_SECRET.
+SECRET_KEY = os.environ.get("JWT_SECRET")
+if not SECRET_KEY:
+    if os.environ.get("ENV", "development") == "production":
+        raise RuntimeError("JWT_SECRET must be set in production")
+    SECRET_KEY = secrets.token_urlsafe(32)
+    logger.warning(
+        "JWT_SECRET not set; generated an ephemeral development secret. "
+        "Sessions will not survive a restart. Set JWT_SECRET for anything real."
+    )
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 72
 
-# ── Database (Ensured persistent location for cloud infrastructure) ────────────
-if os.path.exists("/tmp"):
-    DB_PATH = "/tmp/cv_matcher.db"  # Use writable container storage if available
-else:
-    DB_PATH = os.path.join(os.path.dirname(__file__), "cv_matcher.db")
+# ── Database ───────────────────────────────────────────────────────────────────
+# Default beside the app, not in /tmp: container /tmp is cleared on restart, which
+# silently deletes every registered account. Point DB_PATH at a mounted volume.
+DB_PATH = os.environ.get("DB_PATH") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data", "cv_matcher.db"
+)
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -63,24 +80,22 @@ def init_db():
 # ── App Initialization ─────────────────────────────────────────────────────────
 app = FastAPI(title="CV Job Matcher API", version="2.0.0")
 
-# ── Safe Production CORS Configuration ─────────────────────────────────────────
-class CredentialCORSMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: StarletteRequest, call_next):
-        origin = request.headers.get("origin", "")
-        response = await call_next(request)
-        if origin:
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, X-Auth-Token"
-        
-        # Fast response to preflight checks without letting execution pipeline drop
-        if request.method == "OPTIONS":
-            return JSONResponse(content="OK", headers=response.headers)
-            
-        return response
+# ── CORS ───────────────────────────────────────────────────────────────────────
+# Auth here is cookie-based, so reflecting an arbitrary Origin back with
+# Allow-Credentials: true would let any site call this API as a logged-in user
+# and read the response. Origins come from an explicit allowlist instead.
+_default_origins = "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
+ALLOWED_ORIGINS = [
+    o.strip() for o in os.environ.get("ALLOWED_ORIGINS", _default_origins).split(",") if o.strip()
+]
 
-app.add_middleware(CredentialCORSMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With", "X-Auth-Token"],
+)
 
 @app.on_event("startup")
 def startup():
@@ -219,6 +234,7 @@ def extract_json_from_response(text: str) -> list:
 
 # ── Gemini LLM Call ────────────────────────────────────────────────────────────
 def call_gemini(api_key: str, system: str, user: str) -> str:
+    """Blocking network call. Handlers must reach it via asyncio.to_thread."""
     client = genai.Client(api_key=api_key)
     response = client.models.generate_content(
         model="gemini-2.5-flash",
@@ -337,7 +353,7 @@ async def health():
 async def search_jobs(cv_file: UploadFile = File(...), prompt: str = Form(...), user=Depends(require_gemini_key)):
     cv_bytes = await cv_file.read()
     try:
-        cv_text = extract_pdf_text(cv_bytes)
+        cv_text = await asyncio.to_thread(extract_pdf_text, cv_bytes)
     except Exception:
         raise HTTPException(status_code=400, detail="Could not read PDF.")
 
@@ -350,7 +366,9 @@ async def search_jobs(cv_file: UploadFile = File(...), prompt: str = Form(...), 
         }
     """)
     user_message = f"CV:\n{cv_text[:3000]}\n\nJob Search Request: {prompt}"
-    result_text = call_gemini(user["gemini_api_key"], system_instruction, user_message)
+    result_text = await asyncio.to_thread(
+        call_gemini, user["gemini_api_key"], system_instruction, user_message
+    )
     jobs = extract_json_from_response(result_text)
     return {"jobs": jobs, "cv_text": cv_text}
 
@@ -361,12 +379,14 @@ async def tailor_cv(
 ):
     system_instruction = "Tailor the candidate's CV professionally for the role. Return ONLY plain text."
     user_message = f"Role: {job_title} at {company}\nJD:\n{job_description}\nCV:\n{cv_text}"
-    tailored = call_gemini(user["gemini_api_key"], system_instruction, user_message)
+    tailored = await asyncio.to_thread(
+        call_gemini, user["gemini_api_key"], system_instruction, user_message
+    )
     return {"tailored_cv": tailored.strip()}
 
 @app.post("/api/download")
 async def download_cv(cv_text: str = Form(...), job_title: str = Form(...), company: str = Form(...), user=Depends(auth_required)):
-    pdf_bytes = generate_pdf(cv_text, job_title, company)
+    pdf_bytes = await asyncio.to_thread(generate_pdf, cv_text, job_title, company)
     safe_title = re.sub(r"[^\w\-]", "_", f"{job_title}_{company}_CV")
     return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{safe_title}.pdf"'})
 

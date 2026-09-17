@@ -16,3 +16,8 @@ cv_matcher.db
 
 *.log
 .DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+data/

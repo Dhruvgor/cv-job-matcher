@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Byte-compile
+        run: python -m compileall -q api_server.py
+      - name: Import the app with a test secret
+        env:
+          JWT_SECRET: ci-only-not-a-real-secret
+          DB_PATH: ${{ runner.temp }}/ci.db
+        run: python -c "import api_server; assert api_server.app"
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install and type-check
+        run: |
+          npm ci --no-audit --no-fund
+          npx tsc --noEmit
